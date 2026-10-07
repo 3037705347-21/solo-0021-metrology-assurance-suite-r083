@@ -1,6 +1,10 @@
 package contracts
 
-import "example.com/solo-0021-metrology-assurance-suite/internal/domain"
+import (
+	"time"
+
+	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
+)
 
 type RegisterDeviceRequest struct {
 	AssetTag string `json:"asset_tag"`
@@ -17,8 +21,10 @@ type OpenCaseRequest struct {
 }
 
 type RecordMeasurementRequest struct {
-	Observed   float64 `json:"observed"`
-	Technician string  `json:"technician"`
+	Observed         float64  `json:"observed"`
+	Technician       string   `json:"technician"`
+	ReferenceBatchID *string  `json:"reference_batch_id,omitempty"`
+	ReferenceAmount  *float64 `json:"reference_amount,omitempty"`
 }
 
 type ReopenCaseRequest struct {
@@ -31,8 +37,43 @@ type SealCaseRequest struct {
 	Summary  string `json:"summary"`
 }
 
+type RegisterReferenceBatchRequest struct {
+	Name       string    `json:"name"`
+	Lot        string    `json:"lot"`
+	Unit       string    `json:"unit"`
+	Allowance  float64   `json:"allowance"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	CheckBasis string    `json:"check_basis"`
+	Owner      string    `json:"owner"`
+}
+
+type RecordReferenceCheckRequest struct {
+	Verdict string `json:"verdict"`
+	Basis   string `json:"basis"`
+	Actor   string `json:"actor"`
+	Note    string `json:"note"`
+}
+
 type DeviceResponse struct {
 	Device domain.Device `json:"device"`
+}
+
+// ReferenceBatchView is the current derived state of a reference batch plus its
+// append-only verification history and audit trail.
+type ReferenceBatchView struct {
+	domain.ReferenceBatch
+	Remaining float64                     `json:"remaining"`
+	Status    domain.ReferenceBatchStatus `json:"status"`
+	Checks    []domain.ReferenceCheck     `json:"checks"`
+	Events    []domain.AuditEvent         `json:"events"`
+}
+
+type ReferenceBatchResponse struct {
+	Batch ReferenceBatchView `json:"batch"`
+}
+
+type ReferenceBatchesResponse struct {
+	Batches []ReferenceBatchView `json:"batches"`
 }
 
 type CaseResponse struct {

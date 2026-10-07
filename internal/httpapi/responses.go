@@ -60,6 +60,16 @@ func errorStatus(err error) (int, string) {
 		return http.StatusConflict, "seal_exists"
 	case errors.Is(err, domain.ErrStateConflict):
 		return http.StatusConflict, "state_conflict"
+	case errors.Is(err, domain.ErrDuplicateReference):
+		return http.StatusConflict, "duplicate_reference_lot"
+	case errors.Is(err, domain.ErrReferenceUnknown):
+		return http.StatusConflict, "reference_unknown"
+	case errors.Is(err, domain.ErrReferenceExpired):
+		return http.StatusConflict, "reference_expired"
+	case errors.Is(err, domain.ErrReferenceExhausted):
+		return http.StatusConflict, "reference_exhausted"
+	case errors.Is(err, domain.ErrReferenceCheckFailed):
+		return http.StatusConflict, "reference_check_failed"
 	default:
 		return http.StatusInternalServerError, "internal_error"
 	}

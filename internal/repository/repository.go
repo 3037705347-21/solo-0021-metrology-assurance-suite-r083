@@ -14,6 +14,8 @@ type Repository struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	batches      map[string]domain.ReferenceBatch
+	checks       map[string][]domain.ReferenceCheck
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -24,6 +26,8 @@ func New() *Repository {
 		cases:        make(map[string]domain.VerificationCase),
 		measurements: make(map[string][]domain.Measurement),
 		seals:        make(map[string]domain.EvidenceSeal),
+		batches:      make(map[string]domain.ReferenceBatch),
+		checks:       make(map[string][]domain.ReferenceCheck),
 		counters:     make(map[string]int),
 	}
 }
@@ -33,6 +37,8 @@ type Snapshot struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	batches      map[string]domain.ReferenceBatch
+	checks       map[string][]domain.ReferenceCheck
 	events       []domain.AuditEvent
 }
 
@@ -90,11 +96,51 @@ func (s Snapshot) AllCases() []domain.VerificationCase {
 	return result
 }
 
+func (s Snapshot) ReferenceBatch(id string) (domain.ReferenceBatch, bool) {
+	item, ok := s.batches[id]
+	return item, ok
+}
+
+func (s Snapshot) ReferenceBatchByLot(lot string) (domain.ReferenceBatch, bool) {
+	for _, item := range s.batches {
+		if item.Lot == lot {
+			return item, true
+		}
+	}
+	return domain.ReferenceBatch{}, false
+}
+
+func (s Snapshot) ReferenceChecks(batchID string) []domain.ReferenceCheck {
+	return append([]domain.ReferenceCheck(nil), s.checks[batchID]...)
+}
+
+func (s Snapshot) AllReferenceBatches() []domain.ReferenceBatch {
+	result := make([]domain.ReferenceBatch, 0, len(s.batches))
+	for _, item := range s.batches {
+		result = append(result, item)
+	}
+	return result
+}
+
+// SubjectEvents returns audit events for any subject (e.g. a reference batch),
+// not only case-scoped events.
+func (s Snapshot) SubjectEvents(subjectType, subjectID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range s.events {
+		if item.SubjectType == subjectType && item.SubjectID == subjectID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 type Mutation struct {
 	devices      map[string]domain.Device
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	batches      map[string]domain.ReferenceBatch
+	checks       map[string][]domain.ReferenceCheck
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -203,6 +249,64 @@ func (m *Mutation) Events(caseID string) []domain.AuditEvent {
 	return result
 }
 
+func (m *Mutation) ReferenceBatch(id string) (domain.ReferenceBatch, bool) {
+	item, ok := m.batches[id]
+	return item, ok
+}
+
+func (m *Mutation) ReferenceBatchByLot(lot string) (domain.ReferenceBatch, bool) {
+	for _, item := range m.batches {
+		if item.Lot == lot {
+			return item, true
+		}
+	}
+	return domain.ReferenceBatch{}, false
+}
+
+func (m *Mutation) PutReferenceBatch(item domain.ReferenceBatch) error {
+	if _, exists := m.batches[item.ID]; exists {
+		return fmt.Errorf("%w: reference batch %s", domain.ErrStateConflict, item.ID)
+	}
+	m.batches[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UpdateReferenceBatch(item domain.ReferenceBatch) error {
+	if _, exists := m.batches[item.ID]; !exists {
+		return fmt.Errorf("%w: reference batch %s", domain.ErrNotFound, item.ID)
+	}
+	m.batches[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) AllReferenceBatches() []domain.ReferenceBatch {
+	result := make([]domain.ReferenceBatch, 0, len(m.batches))
+	for _, item := range m.batches {
+		result = append(result, item)
+	}
+	return result
+}
+
+func (m *Mutation) AppendReferenceCheck(item domain.ReferenceCheck) {
+	m.checks[item.BatchID] = append(m.checks[item.BatchID], item)
+}
+
+func (m *Mutation) ReferenceChecks(batchID string) []domain.ReferenceCheck {
+	return append([]domain.ReferenceCheck(nil), m.checks[batchID]...)
+}
+
+// SubjectEvents returns audit events for any subject (e.g. a reference batch),
+// not only case-scoped events.
+func (m *Mutation) SubjectEvents(subjectType, subjectID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range m.events {
+		if item.SubjectType == subjectType && item.SubjectID == subjectID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func (r *Repository) Read(ctx context.Context, fn func(Snapshot) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -224,6 +328,8 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		batches:      cloneBatches(r.batches),
+		checks:       cloneChecks(r.checks),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 		counters:     cloneCounters(r.counters),
 	}
@@ -234,6 +340,8 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
+	r.batches = next.batches
+	r.checks = next.checks
 	r.events = next.events
 	r.counters = next.counters
 	return nil
@@ -245,6 +353,8 @@ func (r *Repository) snapshot() Snapshot {
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		batches:      cloneBatches(r.batches),
+		checks:       cloneChecks(r.checks),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 	}
 }
@@ -277,6 +387,22 @@ func cloneSeals(values map[string]domain.EvidenceSeal) map[string]domain.Evidenc
 	result := make(map[string]domain.EvidenceSeal, len(values))
 	for key, value := range values {
 		result[key] = value
+	}
+	return result
+}
+
+func cloneBatches(values map[string]domain.ReferenceBatch) map[string]domain.ReferenceBatch {
+	result := make(map[string]domain.ReferenceBatch, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneChecks(values map[string][]domain.ReferenceCheck) map[string][]domain.ReferenceCheck {
+	result := make(map[string][]domain.ReferenceCheck, len(values))
+	for key, value := range values {
+		result[key] = append([]domain.ReferenceCheck(nil), value...)
 	}
 	return result
 }

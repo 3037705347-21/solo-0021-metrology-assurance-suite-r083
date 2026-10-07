@@ -22,6 +22,10 @@ go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
 go run ./cmd/workflowcheck --workflow seal-verification
+go run ./cmd/workflowcheck --workflow register-reference-batch
+go run ./cmd/workflowcheck --workflow reference-verification
+go run ./cmd/workflowcheck --workflow reference-measurement
+go run ./cmd/workflowcheck --workflow seal-reference-record
 ```
 
 The workflow runner starts a fresh in-process HTTP service and exercises the
@@ -42,6 +46,10 @@ or extend these smoke checks with red/green verification tests.
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+- `POST /reference-batches`
+- `GET /reference-batches`
+- `GET /reference-batches/{id}`
+- `POST /reference-batches/{id}/checks`
 
 ## Layout
 
@@ -67,5 +75,32 @@ resource view or a stable error object:
   }
 }
 ```
+
+## Reference Material Batches
+
+Measurements that consume a reference material or reference artifact cite a
+registered batch instead of a free-text name. A steward registers a batch with
+its lot, expiry, total allowed usage amount, unit, and verification basis
+(`POST /reference-batches`); registration records an initial passing check.
+
+A measurement passes `reference_batch_id` and `reference_amount`. The service
+gates the citation atomically before recording anything:
+
+- the batch id must be registered (`reference_unknown` otherwise),
+- the latest verification check must exist and have passed
+  (`reference_check_failed`),
+- the batch must be in date at use time (`reference_expired`),
+- the amount must fit within the remaining allowance (`reference_exhausted`).
+
+A valid citation consumes the amount and snapshots the batch id, name, lot,
+unit, amount, total allowance, expiry, check basis, and check time onto the
+measurement. The accepted measurement's snapshot is copied into the evidence
+seal at sealing time. These snapshots are facts at the moment of use: expiring a
+batch, exhausting it, or recording a later failed check changes the batch's
+current status but never rewrites a recorded measurement or a sealed record.
+
+Verification checks are append-only (`POST /reference-batches/{id}/checks`);
+the most recent check is the current verdict, so a later passing check can
+restore an in-date batch that still has allowance.
 
 The service has no environment variables and no external dependencies.

@@ -106,3 +106,49 @@ func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
 }
+
+func (s *Server) registerReferenceBatch(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterReferenceBatchRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.RegisterReferenceBatch(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.ReferenceBatchResponse{Batch: view})
+}
+
+func (s *Server) referenceBatch(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.ReferenceBatch(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.ReferenceBatchResponse{Batch: view})
+}
+
+func (s *Server) referenceBatches(writer http.ResponseWriter, request *http.Request) {
+	views, err := s.service.ReferenceBatches(request.Context())
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.ReferenceBatchesResponse{Batches: views})
+}
+
+func (s *Server) recordReferenceCheck(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RecordReferenceCheckRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.RecordReferenceCheck(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.ReferenceBatchResponse{Batch: view})
+}

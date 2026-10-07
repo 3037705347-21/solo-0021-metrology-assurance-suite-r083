@@ -146,6 +146,42 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
+		now := s.now()
+
+		// Resolve and gate the reference material citation before anything is
+		// recorded. An unknown source, a failed/latest-not-passing check, an
+		// expired batch, or an over-allocation all prevent a valid citation and
+		// prevent the measurement from being recorded at all.
+		var citation *domain.ReferenceCitation
+		switch {
+		case input.ReferenceBatchID == nil && input.ReferenceAmount == nil:
+			// No reference material consumed by this measurement.
+		case input.ReferenceBatchID == nil || input.ReferenceAmount == nil:
+			return fmt.Errorf("%w: reference batch id and amount must be provided together", domain.ErrInvalidInput)
+		default:
+			batchID := strings.TrimSpace(*input.ReferenceBatchID)
+			batch, ok := m.ReferenceBatch(batchID)
+			if !ok {
+				return fmt.Errorf("%w: reference batch %s", domain.ErrReferenceUnknown, batchID)
+			}
+			checks := m.ReferenceChecks(batch.ID)
+			latest := latestCheck(checks)
+			if err := batch.ValidateUse(latest, *input.ReferenceAmount, now); err != nil {
+				return err
+			}
+			if err := batch.Consume(*input.ReferenceAmount); err != nil {
+				return err
+			}
+			if err := m.UpdateReferenceBatch(batch); err != nil {
+				return err
+			}
+			snapshot, err := domain.NewReferenceCitation(batch, *latest, *input.ReferenceAmount, now)
+			if err != nil {
+				return err
+			}
+			citation = &snapshot
+		}
+
 		measurement, err := domain.NewMeasurement(
 			m.NextID("measurement"),
 			item.ID,
@@ -153,12 +189,13 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			item.Nominal,
 			item.Tolerance,
 			input.Technician,
-			s.now(),
+			citation,
+			now,
 		)
 		if err != nil {
 			return err
 		}
-		if err := item.RecordMeasurement(measurement.Accepted, s.now()); err != nil {
+		if err := item.RecordMeasurement(measurement.Accepted, now); err != nil {
 			return err
 		}
 		if err := m.AppendMeasurement(measurement); err != nil {
@@ -173,6 +210,9 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			kind = "measurement_accepted"
 			detail = "measurement is within tolerance and ready for review"
 		}
+		if citation != nil {
+			detail = fmt.Sprintf("%s; consumed %.4f %s of reference batch %s (%s)", detail, citation.AmountUsed, citation.Unit, citation.BatchID, citation.Lot)
+		}
 		event, err := domain.NewAuditEvent(
 			m.NextID("event"),
 			"case",
@@ -181,12 +221,28 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			kind,
 			measurement.Technician,
 			detail,
-			s.now(),
+			now,
 		)
 		if err != nil {
 			return err
 		}
 		m.AppendEvent(event)
+		if citation != nil {
+			referenceEvent, err := domain.NewAuditEvent(
+				m.NextID("event"),
+				"reference_batch",
+				citation.BatchID,
+				item.ID,
+				"reference_consumed",
+				measurement.Technician,
+				fmt.Sprintf("%.4f %s consumed by measurement %s for case %s", citation.AmountUsed, citation.Unit, measurement.ID, item.ID),
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			m.AppendEvent(referenceEvent)
+		}
 		result = caseResponse(m, item)
 		return nil
 	})
@@ -257,6 +313,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 			measurement.ID,
 			input.Reviewer,
 			input.Summary,
+			measurement.Reference,
 			s.now(),
 		)
 		if err != nil {
