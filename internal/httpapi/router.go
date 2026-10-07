@@ -30,6 +30,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /cases/{id}/reopen", s.reopenCase)
 	s.mux.HandleFunc("POST /cases/{id}/seal", s.sealCase)
 	s.mux.HandleFunc("GET /cases/{id}/events", s.events)
+	s.mux.HandleFunc("POST /batches", s.registerBatch)
+	s.mux.HandleFunc("GET /batches/{id}", s.batchView)
+	s.mux.HandleFunc("POST /batches/{id}/fail-check", s.failBatchCheck)
+	s.mux.HandleFunc("POST /batches/{id}/reinstate", s.reinstateBatch)
+	s.mux.HandleFunc("POST /batches/{id}/retire", s.retireBatch)
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

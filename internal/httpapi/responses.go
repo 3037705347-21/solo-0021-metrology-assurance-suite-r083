@@ -58,6 +58,14 @@ func errorStatus(err error) (int, string) {
 		return http.StatusConflict, "active_case_exists"
 	case errors.Is(err, domain.ErrSealAlreadyCreated):
 		return http.StatusConflict, "seal_exists"
+	case errors.Is(err, domain.ErrDuplicateBatchLot):
+		return http.StatusConflict, "duplicate_batch_lot"
+	case errors.Is(err, domain.ErrBatchNotActive):
+		return http.StatusConflict, "batch_not_active"
+	case errors.Is(err, domain.ErrBatchExpired):
+		return http.StatusConflict, "batch_expired"
+	case errors.Is(err, domain.ErrBatchUsageExceeded):
+		return http.StatusConflict, "batch_usage_exceeded"
 	case errors.Is(err, domain.ErrStateConflict):
 		return http.StatusConflict, "state_conflict"
 	default:

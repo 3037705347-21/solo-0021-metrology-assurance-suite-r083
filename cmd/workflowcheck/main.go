@@ -35,11 +35,13 @@ func main() {
 	flag.Parse()
 
 	checks := map[string]func() error{
-		"register-device":          checkRegisterDevice,
-		"open-verification-case":   checkOpenVerificationCase,
-		"record-measurement":       checkRecordMeasurement,
-		"reopen-verification-case": checkReopenVerificationCase,
-		"seal-verification":        checkSealVerification,
+		"register-device":               checkRegisterDevice,
+		"open-verification-case":        checkOpenVerificationCase,
+		"record-measurement":            checkRecordMeasurement,
+		"reopen-verification-case":      checkReopenVerificationCase,
+		"seal-verification":             checkSealVerification,
+		"register-reference-batch":      checkRegisterReferenceBatch,
+		"record-measurement-with-batch": checkRecordMeasurementWithBatch,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -375,6 +377,272 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkRegisterReferenceBatch() error {
+	h := newHarness()
+	defer h.close()
+
+	expires := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	response, err := h.request(http.MethodPost, "/batches", map[string]any{
+		"material_name": "Standard Weight Set",
+		"lot_number":    " lot-2026-01 ",
+		"steward":       "Lin",
+		"check_basis":   "certificate CAL-2026-114",
+		"max_usage":     3,
+		"expires_at":    expires,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return err
+	}
+	id, err := nestedString(response.Body, "batch", "id")
+	if err != nil {
+		return err
+	}
+	lot, err := nestedString(response.Body, "batch", "lot_number")
+	if err != nil {
+		return err
+	}
+	if lot != "LOT-2026-01" {
+		return fmt.Errorf("lot number was not normalized: %q", lot)
+	}
+	remaining, err := nestedFloat(response.Body, "batch", "max_usage")
+	if err != nil {
+		return err
+	}
+	if remaining != 3 {
+		return fmt.Errorf("max usage = %v, expected 3", remaining)
+	}
+
+	read, err := h.request(http.MethodGet, "/batches/"+id, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	if !hasEvent(read.Body, "batch_registered") {
+		return errors.New("batch_registered audit event is missing")
+	}
+
+	duplicate, err := h.request(http.MethodPost, "/batches", map[string]any{
+		"material_name": "standard weight set",
+		"lot_number":    "LOT-2026-01",
+		"steward":       "Mira",
+		"check_basis":   "certificate CAL-2026-115",
+		"max_usage":     2,
+		"expires_at":    expires,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "duplicate_batch_lot"); err != nil {
+		return err
+	}
+
+	invalid, err := h.request(http.MethodPost, "/batches", map[string]any{
+		"material_name": "Reference Oil",
+		"lot_number":    "LOT-2026-02",
+		"steward":       "Lin",
+		"check_basis":   "certificate CAL-2026-116",
+		"max_usage":     0,
+		"expires_at":    expires,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(invalid, http.StatusBadRequest); err != nil {
+		return err
+	}
+	return expectErrorCode(invalid, "invalid_input")
+}
+
+func checkRecordMeasurementWithBatch() error {
+	h := newHarness()
+	defer h.close()
+
+	batchID, err := h.createBatch("LOT-2026-11", 1, time.Now().Add(30*24*time.Hour))
+	if err != nil {
+		return err
+	}
+	caseID, err := h.openAwaitingCase("MET-1501")
+	if err != nil {
+		return err
+	}
+
+	accepted, err := h.recordMeasurementWithBatch(caseID, 25.2, "Rui", batchID, 1)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(accepted, http.StatusCreated); err != nil {
+		return err
+	}
+	snapshotBatch, err := nestedStringAt(accepted.Body, "measurements", 0, "batch", "batch_id")
+	if err != nil {
+		return err
+	}
+	if snapshotBatch != batchID {
+		return fmt.Errorf("measurement batch snapshot = %q, expected %q", snapshotBatch, batchID)
+	}
+	snapshotLot, err := nestedStringAt(accepted.Body, "measurements", 0, "batch", "lot_number")
+	if err != nil {
+		return err
+	}
+	if snapshotLot != "LOT-2026-11" {
+		return fmt.Errorf("measurement lot snapshot = %q", snapshotLot)
+	}
+	if !hasEvent(accepted.Body, "batch_consumed") {
+		return errors.New("batch_consumed audit event is missing")
+	}
+
+	batchView, err := h.request(http.MethodGet, "/batches/"+batchID, nil)
+	if err != nil {
+		return err
+	}
+	used, err := nestedFloat(batchView.Body, "batch", "usage_count")
+	if err != nil {
+		return err
+	}
+	if used != 1 {
+		return fmt.Errorf("batch usage count = %v, expected 1", used)
+	}
+
+	// The single allowed use is consumed; a second measurement on another
+	// case must be rejected and must not record anything.
+	exhaustedCase, err := h.openAwaitingCase("MET-1502")
+	if err != nil {
+		return err
+	}
+	exhausted, err := h.recordMeasurementWithBatch(exhaustedCase, 25.1, "Rui", batchID, 1)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(exhausted, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(exhausted, "batch_usage_exceeded"); err != nil {
+		return err
+	}
+	measurements, err := nestedSlice(exhausted.Body, "measurements")
+	if err == nil && len(measurements) != 0 {
+		return fmt.Errorf("rejected consumption recorded %d measurements", len(measurements))
+	}
+
+	// An unknown batch reference cannot form a valid citation.
+	unknown, err := h.recordMeasurementWithBatch(exhaustedCase, 25.1, "Rui", "batch-9999", 1)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(unknown, http.StatusNotFound); err != nil {
+		return err
+	}
+	if err := expectErrorCode(unknown, "not_found"); err != nil {
+		return err
+	}
+
+	// An expired batch cannot form a valid citation.
+	expiredID, err := h.createBatch("LOT-2020-99", 5, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return err
+	}
+	expired, err := h.recordMeasurementWithBatch(exhaustedCase, 25.1, "Rui", expiredID, 1)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(expired, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(expired, "batch_expired"); err != nil {
+		return err
+	}
+
+	// A batch that failed its check cannot form a valid citation until it
+	// is reinstated.
+	failedID, err := h.createBatch("LOT-2026-12", 5, time.Now().Add(30*24*time.Hour))
+	if err != nil {
+		return err
+	}
+	failResponse, err := h.request(http.MethodPost, "/batches/"+failedID+"/fail-check", map[string]any{
+		"actor":  "Lin",
+		"reason": "scheduled verification drifted out of limits",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(failResponse, http.StatusOK); err != nil {
+		return err
+	}
+	blocked, err := h.recordMeasurementWithBatch(exhaustedCase, 25.1, "Rui", failedID, 1)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "batch_not_active"); err != nil {
+		return err
+	}
+	reinstated, err := h.request(http.MethodPost, "/batches/"+failedID+"/reinstate", map[string]any{
+		"actor":  "Lin",
+		"reason": "recheck passed under certificate CAL-2026-201",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reinstated, http.StatusOK); err != nil {
+		return err
+	}
+
+	// Seal the first case, retire the batch it consumed, and prove the
+	// sealed measurement facts are not rewritten.
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Qiao",
+		"summary":  "accepted measurement sealed with batch citation",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	retired, err := h.request(http.MethodPost, "/batches/"+batchID+"/retire", map[string]any{
+		"actor":  "Lin",
+		"reason": "lot exhausted and removed from service",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(retired, http.StatusOK); err != nil {
+		return err
+	}
+	reread, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reread, http.StatusOK); err != nil {
+		return err
+	}
+	frozenBatch, err := nestedStringAt(reread.Body, "measurements", 0, "batch", "batch_id")
+	if err != nil {
+		return err
+	}
+	if frozenBatch != batchID {
+		return fmt.Errorf("sealed measurement batch changed to %q", frozenBatch)
+	}
+	frozenLot, err := nestedStringAt(reread.Body, "measurements", 0, "batch", "lot_number")
+	if err != nil {
+		return err
+	}
+	if frozenLot != "LOT-2026-11" {
+		return fmt.Errorf("sealed measurement lot changed to %q", frozenLot)
+	}
+	return nil
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -463,6 +731,45 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 	})
 }
 
+func (h *harness) recordMeasurementWithBatch(caseID string, observed float64, technician, batchID string, quantity int) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/measurements", map[string]any{
+		"observed":       observed,
+		"technician":     technician,
+		"batch_id":       batchID,
+		"batch_quantity": quantity,
+	})
+}
+
+func (h *harness) createBatch(lotNumber string, maxUsage int, expiresAt time.Time) (string, error) {
+	response, err := h.request(http.MethodPost, "/batches", map[string]any{
+		"material_name": "Standard Weight Set",
+		"lot_number":    lotNumber,
+		"steward":       "Lin",
+		"check_basis":   "certificate CAL-2026-114",
+		"max_usage":     maxUsage,
+		"expires_at":    expiresAt.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return nestedString(response.Body, "batch", "id")
+}
+
+func (h *harness) openAwaitingCase(tag string) (string, error) {
+	deviceID, err := h.createDevice(tag)
+	if err != nil {
+		return "", err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return "", err
+	}
+	return nestedString(opened.Body, "case", "id")
+}
+
 func (h *harness) rejectedCase(tag string) (string, error) {
 	deviceID, err := h.createDevice(tag)
 	if err != nil {
@@ -539,6 +846,18 @@ func nestedString(root map[string]any, path ...string) (string, error) {
 	return text, nil
 }
 
+func nestedStringAt(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%v is not a string", path)
+	}
+	return text, nil
+}
+
 func nestedBool(root map[string]any, path ...any) (bool, error) {
 	value, err := nestedAny(root, path...)
 	if err != nil {
@@ -549,6 +868,18 @@ func nestedBool(root map[string]any, path ...any) (bool, error) {
 		return false, fmt.Errorf("%v is not a boolean", path)
 	}
 	return flag, nil
+}
+
+func nestedFloat(root map[string]any, path ...any) (float64, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return 0, err
+	}
+	number, ok := value.(float64)
+	if !ok {
+		return 0, fmt.Errorf("%v is not a number", path)
+	}
+	return number, nil
 }
 
 func nestedSlice(root map[string]any, key string) ([]any, error) {

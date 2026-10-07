@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 
 	"example.com/solo-0021-metrology-assurance-suite/internal/contracts"
@@ -105,4 +106,53 @@ func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
+}
+
+func (s *Server) registerBatch(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterBatchRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.RegisterBatch(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) batchView(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.Batch(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) failBatchCheck(writer http.ResponseWriter, request *http.Request) {
+	s.transitionBatch(writer, request, s.service.FailBatchCheck)
+}
+
+func (s *Server) reinstateBatch(writer http.ResponseWriter, request *http.Request) {
+	s.transitionBatch(writer, request, s.service.ReinstateBatch)
+}
+
+func (s *Server) retireBatch(writer http.ResponseWriter, request *http.Request) {
+	s.transitionBatch(writer, request, s.service.RetireBatch)
+}
+
+func (s *Server) transitionBatch(writer http.ResponseWriter, request *http.Request, transition func(context.Context, string, contracts.BatchTransitionRequest) (contracts.BatchResponse, error)) {
+	input, err := decodeJSON[contracts.BatchTransitionRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := transition(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
 }

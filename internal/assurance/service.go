@@ -146,6 +146,13 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
+		if item.State != domain.CaseAwaitingMeasurement {
+			return fmt.Errorf("%w: case is not awaiting measurement", domain.ErrStateConflict)
+		}
+		usage, err := consumeBatch(m, input, s.now())
+		if err != nil {
+			return err
+		}
 		measurement, err := domain.NewMeasurement(
 			m.NextID("measurement"),
 			item.ID,
@@ -153,6 +160,7 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			item.Nominal,
 			item.Tolerance,
 			input.Technician,
+			usage,
 			s.now(),
 		)
 		if err != nil {
@@ -187,10 +195,59 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			return err
 		}
 		m.AppendEvent(event)
+		if usage != nil {
+			consumed, err := domain.NewAuditEvent(
+				m.NextID("event"),
+				"batch",
+				usage.BatchID,
+				item.ID,
+				"batch_consumed",
+				measurement.Technician,
+				fmt.Sprintf("consumed %d of lot %s for measurement %s", usage.Quantity, usage.LotNumber, measurement.ID),
+				s.now(),
+			)
+			if err != nil {
+				return err
+			}
+			m.AppendEvent(consumed)
+		}
 		result = caseResponse(m, item)
 		return nil
 	})
 	return result, err
+}
+
+// consumeBatch resolves the requested batch reference, enforces the usage
+// constraints, and accounts for the consumption inside the same mutation so
+// the check and the deduction commit atomically. It returns the immutable
+// usage snapshot for the measurement, or nil when no batch is referenced.
+func consumeBatch(m *repository.Mutation, input contracts.RecordMeasurementRequest, at time.Time) (*domain.BatchUsage, error) {
+	batchID := strings.TrimSpace(input.BatchID)
+	if batchID == "" {
+		if input.BatchQuantity != 0 {
+			return nil, fmt.Errorf("%w: batch_quantity requires batch_id", domain.ErrInvalidInput)
+		}
+		return nil, nil
+	}
+	quantity := input.BatchQuantity
+	if quantity == 0 {
+		quantity = 1
+	}
+	batch, exists := m.Batch(batchID)
+	if !exists {
+		return nil, fmt.Errorf("%w: batch %s", domain.ErrNotFound, batchID)
+	}
+	if err := batch.Consume(quantity, at); err != nil {
+		return nil, err
+	}
+	usage, err := domain.NewBatchUsage(batch, quantity)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.UpdateBatch(batch); err != nil {
+		return nil, err
+	}
+	return &usage, nil
 }
 
 func (s *Service) ReopenCase(ctx context.Context, caseID string, input contracts.ReopenCaseRequest) (contracts.CaseResponse, error) {
@@ -286,6 +343,125 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 		return nil
 	})
 	return result, err
+}
+
+func (s *Service) RegisterBatch(ctx context.Context, input contracts.RegisterBatchRequest) (contracts.BatchResponse, error) {
+	var result contracts.BatchResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		key := domain.BatchKey(input.MaterialName, input.LotNumber)
+		if _, exists := m.BatchByKey(key); exists {
+			return fmt.Errorf("%w: %s", domain.ErrDuplicateBatchLot, key)
+		}
+		item, err := domain.NewReferenceBatch(
+			m.NextID("batch"),
+			input.MaterialName,
+			input.LotNumber,
+			input.Steward,
+			input.CheckBasis,
+			input.MaxUsage,
+			input.ExpiresAt,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.PutBatch(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"batch",
+			item.ID,
+			"",
+			"batch_registered",
+			item.Steward,
+			fmt.Sprintf("reference batch %s lot %s registered with %d allowed uses", item.MaterialName, item.LotNumber, item.MaxUsage),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = batchResponse(m, item)
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) Batch(ctx context.Context, id string) (contracts.BatchResponse, error) {
+	var result contracts.BatchResponse
+	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
+		item, exists := snapshot.Batch(strings.TrimSpace(id))
+		if !exists {
+			return fmt.Errorf("%w: batch %s", domain.ErrNotFound, id)
+		}
+		result = contracts.BatchResponse{
+			Batch:  item,
+			Events: snapshot.BatchEvents(item.ID),
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) FailBatchCheck(ctx context.Context, id string, input contracts.BatchTransitionRequest) (contracts.BatchResponse, error) {
+	return s.transitionBatch(ctx, id, input, "batch_check_failed", "batch check failed and is blocked from new measurements",
+		func(item *domain.ReferenceBatch, at time.Time) error { return item.FailCheck(at) })
+}
+
+func (s *Service) ReinstateBatch(ctx context.Context, id string, input contracts.BatchTransitionRequest) (contracts.BatchResponse, error) {
+	return s.transitionBatch(ctx, id, input, "batch_reinstated", "batch passed a new check and is usable again",
+		func(item *domain.ReferenceBatch, at time.Time) error { return item.Reinstate(at) })
+}
+
+func (s *Service) RetireBatch(ctx context.Context, id string, input contracts.BatchTransitionRequest) (contracts.BatchResponse, error) {
+	return s.transitionBatch(ctx, id, input, "batch_retired", "batch retired and permanently blocked from new measurements",
+		func(item *domain.ReferenceBatch, at time.Time) error { return item.Retire(at) })
+}
+
+func (s *Service) transitionBatch(ctx context.Context, id string, input contracts.BatchTransitionRequest, kind, detail string, transition func(*domain.ReferenceBatch, time.Time) error) (contracts.BatchResponse, error) {
+	var result contracts.BatchResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		item, exists := m.Batch(strings.TrimSpace(id))
+		if !exists {
+			return fmt.Errorf("%w: batch %s", domain.ErrNotFound, id)
+		}
+		actor := strings.TrimSpace(input.Actor)
+		reason := strings.TrimSpace(input.Reason)
+		if actor == "" || reason == "" {
+			return fmt.Errorf("%w: actor and reason are required", domain.ErrInvalidInput)
+		}
+		if err := transition(&item, s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateBatch(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"batch",
+			item.ID,
+			"",
+			kind,
+			actor,
+			fmt.Sprintf("%s: %s", detail, reason),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = batchResponse(m, item)
+		return nil
+	})
+	return result, err
+}
+
+func batchResponse(m *repository.Mutation, item domain.ReferenceBatch) contracts.BatchResponse {
+	return contracts.BatchResponse{
+		Batch:  item,
+		Events: m.BatchEvents(item.ID),
+	}
 }
 
 func bestAcceptedMeasurement(items []domain.Measurement) (domain.Measurement, bool) {

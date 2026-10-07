@@ -14,6 +14,7 @@ type Repository struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	batches      map[string]domain.ReferenceBatch
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -24,6 +25,7 @@ func New() *Repository {
 		cases:        make(map[string]domain.VerificationCase),
 		measurements: make(map[string][]domain.Measurement),
 		seals:        make(map[string]domain.EvidenceSeal),
+		batches:      make(map[string]domain.ReferenceBatch),
 		counters:     make(map[string]int),
 	}
 }
@@ -33,6 +35,7 @@ type Snapshot struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	batches      map[string]domain.ReferenceBatch
 	events       []domain.AuditEvent
 }
 
@@ -62,6 +65,21 @@ func (s Snapshot) Measurements(caseID string) []domain.Measurement {
 func (s Snapshot) Seal(caseID string) (domain.EvidenceSeal, bool) {
 	item, ok := s.seals[caseID]
 	return item, ok
+}
+
+func (s Snapshot) Batch(id string) (domain.ReferenceBatch, bool) {
+	item, ok := s.batches[id]
+	return item, ok
+}
+
+func (s Snapshot) BatchEvents(batchID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range s.events {
+		if item.SubjectType == "batch" && item.SubjectID == batchID {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (s Snapshot) Events(caseID string) []domain.AuditEvent {
@@ -95,6 +113,7 @@ type Mutation struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	batches      map[string]domain.ReferenceBatch
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -189,6 +208,46 @@ func (m *Mutation) PutSeal(item domain.EvidenceSeal) error {
 	return nil
 }
 
+func (m *Mutation) Batch(id string) (domain.ReferenceBatch, bool) {
+	item, ok := m.batches[id]
+	return item, ok
+}
+
+func (m *Mutation) BatchByKey(key string) (domain.ReferenceBatch, bool) {
+	for _, item := range m.batches {
+		if domain.BatchKey(item.MaterialName, item.LotNumber) == key {
+			return item, true
+		}
+	}
+	return domain.ReferenceBatch{}, false
+}
+
+func (m *Mutation) PutBatch(item domain.ReferenceBatch) error {
+	if _, exists := m.batches[item.ID]; exists {
+		return fmt.Errorf("%w: batch %s", domain.ErrStateConflict, item.ID)
+	}
+	m.batches[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UpdateBatch(item domain.ReferenceBatch) error {
+	if _, exists := m.batches[item.ID]; !exists {
+		return fmt.Errorf("%w: batch %s", domain.ErrNotFound, item.ID)
+	}
+	m.batches[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) BatchEvents(batchID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range m.events {
+		if item.SubjectType == "batch" && item.SubjectID == batchID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func (m *Mutation) AppendEvent(item domain.AuditEvent) {
 	m.events = append(m.events, item)
 }
@@ -224,6 +283,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		batches:      cloneBatches(r.batches),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 		counters:     cloneCounters(r.counters),
 	}
@@ -234,6 +294,7 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
+	r.batches = next.batches
 	r.events = next.events
 	r.counters = next.counters
 	return nil
@@ -245,6 +306,7 @@ func (r *Repository) snapshot() Snapshot {
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		batches:      cloneBatches(r.batches),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 	}
 }
@@ -275,6 +337,14 @@ func cloneMeasurements(values map[string][]domain.Measurement) map[string][]doma
 
 func cloneSeals(values map[string]domain.EvidenceSeal) map[string]domain.EvidenceSeal {
 	result := make(map[string]domain.EvidenceSeal, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneBatches(values map[string]domain.ReferenceBatch) map[string]domain.ReferenceBatch {
+	result := make(map[string]domain.ReferenceBatch, len(values))
 	for key, value := range values {
 		result[key] = value
 	}

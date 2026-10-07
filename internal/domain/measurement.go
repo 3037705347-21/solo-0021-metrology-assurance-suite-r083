@@ -7,18 +7,19 @@ import (
 )
 
 type Measurement struct {
-	ID         string    `json:"id"`
-	CaseID     string    `json:"case_id"`
-	Observed   float64   `json:"observed"`
-	Nominal    float64   `json:"nominal"`
-	Deviation  float64   `json:"deviation"`
-	Tolerance  float64   `json:"tolerance"`
-	Accepted   bool      `json:"accepted"`
-	Technician string    `json:"technician"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         string      `json:"id"`
+	CaseID     string      `json:"case_id"`
+	Observed   float64     `json:"observed"`
+	Nominal    float64     `json:"nominal"`
+	Deviation  float64     `json:"deviation"`
+	Tolerance  float64     `json:"tolerance"`
+	Accepted   bool        `json:"accepted"`
+	Technician string      `json:"technician"`
+	Batch      *BatchUsage `json:"batch,omitempty"`
+	CreatedAt  time.Time   `json:"created_at"`
 }
 
-func NewMeasurement(id, caseID string, observed, nominal, tolerance float64, technician string, at time.Time) (Measurement, error) {
+func NewMeasurement(id, caseID string, observed, nominal, tolerance float64, technician string, batch *BatchUsage, at time.Time) (Measurement, error) {
 	item := Measurement{
 		ID:         strings.TrimSpace(id),
 		CaseID:     strings.TrimSpace(caseID),
@@ -28,6 +29,7 @@ func NewMeasurement(id, caseID string, observed, nominal, tolerance float64, tec
 		Tolerance:  tolerance,
 		Accepted:   abs(observed-nominal) <= tolerance,
 		Technician: strings.TrimSpace(technician),
+		Batch:      batch,
 		CreatedAt:  at.UTC(),
 	}
 	if err := item.Validate(); err != nil {
@@ -42,6 +44,11 @@ func (m Measurement) Validate() error {
 	}
 	if !isFinite(m.Observed) || !isFinite(m.Nominal) || !isFinite(m.Tolerance) || m.Tolerance <= 0 {
 		return fmt.Errorf("%w: observed and nominal must be finite and tolerance must be positive", ErrInvalidInput)
+	}
+	if m.Batch != nil {
+		if err := m.Batch.Validate(); err != nil {
+			return err
+		}
 	}
 	if m.CreatedAt.IsZero() {
 		return fmt.Errorf("%w: measurement time is required", ErrInvalidInput)

@@ -22,6 +22,8 @@ go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
 go run ./cmd/workflowcheck --workflow seal-verification
+go run ./cmd/workflowcheck --workflow register-reference-batch
+go run ./cmd/workflowcheck --workflow record-measurement-with-batch
 ```
 
 The workflow runner starts a fresh in-process HTTP service and exercises the
@@ -42,6 +44,35 @@ or extend these smoke checks with red/green verification tests.
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+- `POST /batches`
+- `GET /batches/{id}`
+- `POST /batches/{id}/fail-check`
+- `POST /batches/{id}/reinstate`
+- `POST /batches/{id}/retire`
+
+## Reference Batches
+
+A steward registers each lot of reference material with `POST /batches`,
+declaring its check basis, expiry, and allowed usage budget. A measurement
+that consumes reference material cites the batch with `batch_id` and an
+optional `batch_quantity` (default 1) on `POST /cases/{id}/measurements`:
+
+```json
+{
+  "observed": 25.2,
+  "technician": "Rui",
+  "batch_id": "batch-0001",
+  "batch_quantity": 1
+}
+```
+
+The citation is validated and deducted in the same atomic commit as the
+measurement. The request fails without recording anything when the batch is
+unknown (`not_found`), exhausted (`batch_usage_exceeded`), expired
+(`batch_expired`), or blocked by a failed check (`batch_not_active`). The
+measurement stores an immutable snapshot of the batch as consumed, so later
+batch transitions — reinstatement, retirement, or expiry — never rewrite
+recorded or sealed measurement facts.
 
 ## Layout
 

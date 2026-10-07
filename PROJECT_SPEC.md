@@ -25,10 +25,15 @@ external service.
 - VerificationCase: one bounded assurance activity for a device, with a nominal
   value, tolerance, current state, version, and assigned steward.
 - Measurement: an observed value, computed deviation, acceptance decision,
-  technician, and timestamp.
+  technician, timestamp, and an optional immutable snapshot of the reference
+  batch it consumed.
+- ReferenceBatch: one registered lot of a reference material, with material
+  name, normalized lot number, steward, check basis, expiry, allowed usage
+  budget, consumed usage, and lifecycle state.
 - EvidenceSeal: the immutable closing record for a reviewed case, including the
   selected accepted measurement.
-- AuditEvent: an append-only trace of meaningful case and device changes.
+- AuditEvent: an append-only trace of meaningful case, device, and batch
+  changes.
 
 ## Workflows
 
@@ -52,6 +57,15 @@ nominal value. An in-tolerance measurement moves the case to
 `review_ready`; an out-of-tolerance measurement moves it to
 `recheck_required`.
 
+When the measurement consumes a reference material, the request carries
+`batch_id` and an optional `batch_quantity` (default 1). The service verifies
+inside the same atomic commit that the batch exists, is `active`, is not
+expired at the measurement time, and has enough remaining usage. Any violation
+rejects the whole measurement: no measurement, no case transition, and no
+usage deduction is committed. A valid request deducts the quantity from the
+batch and stores an immutable batch snapshot (batch id, material, lot, check
+basis, quantity, expiry) on the measurement.
+
 ### 4. Reopen Verification Case
 
 The steward sends `POST /cases/{id}/reopen` after an out-of-tolerance result.
@@ -64,6 +78,21 @@ The verifier sends `POST /cases/{id}/seal` after an accepted measurement. Only
 `review_ready` cases may be sealed. The service selects the accepted
 measurement with the smallest absolute deviation, creates exactly one evidence
 seal, moves the case to `sealed`, and rejects later mutations.
+
+### 6. Register Reference Batch
+
+The steward sends `POST /batches` with a material name, lot number, steward,
+check basis, allowed usage count, and expiry time. The service normalizes the
+lot number, rejects a duplicate lot for the same material, and creates an
+`active` batch with zero consumed usage.
+
+### 7. Transition Reference Batch
+
+The steward sends `POST /batches/{id}/fail-check`, `/reinstate`, or `/retire`
+with an actor and reason. A failed check blocks the batch from new
+measurements until it is reinstated; retiring is terminal. Every transition
+appends an audit event. Batch transitions never rewrite the batch snapshots
+already stored on recorded measurements.
 
 ## State And Rules
 
@@ -80,6 +109,14 @@ VerificationCase state:
 - `review_ready -> sealed`
 - `sealed` is terminal.
 
+ReferenceBatch state:
+
+- `active -> failed`
+- `failed -> active`
+- `active -> retired`
+- `failed -> retired`
+- `retired` is terminal.
+
 Required invariants:
 
 - Asset tags are unique after case-insensitive normalization.
@@ -88,6 +125,13 @@ Required invariants:
 - A tolerance must be positive.
 - A case can have at most one evidence seal.
 - A sealed case cannot accept measurements, reopen, or seal again.
+- A batch lot is unique per material after case-insensitive normalization.
+- A measurement may cite a batch only when the batch exists, is active, is
+  unexpired at the measurement time, and has enough remaining usage.
+- Batch consumption, the measurement, the case transition, and the audit
+  events commit atomically; a rejected citation deducts nothing.
+- The batch snapshot stored on a measurement is immutable; later batch state
+  changes never rewrite recorded measurement facts.
 - Every mutation that changes a case also appends an audit event in the same
   repository commit.
 
@@ -113,6 +157,11 @@ Required invariants:
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+- `POST /batches`
+- `GET /batches/{id}`
+- `POST /batches/{id}/fail-check`
+- `POST /batches/{id}/reinstate`
+- `POST /batches/{id}/retire`
 
 ## Validation Plan
 

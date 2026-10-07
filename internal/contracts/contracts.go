@@ -1,6 +1,10 @@
 package contracts
 
-import "example.com/solo-0021-metrology-assurance-suite/internal/domain"
+import (
+	"time"
+
+	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
+)
 
 type RegisterDeviceRequest struct {
 	AssetTag string `json:"asset_tag"`
@@ -17,8 +21,10 @@ type OpenCaseRequest struct {
 }
 
 type RecordMeasurementRequest struct {
-	Observed   float64 `json:"observed"`
-	Technician string  `json:"technician"`
+	Observed      float64 `json:"observed"`
+	Technician    string  `json:"technician"`
+	BatchID       string  `json:"batch_id,omitempty"`
+	BatchQuantity int     `json:"batch_quantity,omitempty"`
 }
 
 type ReopenCaseRequest struct {
@@ -31,6 +37,20 @@ type SealCaseRequest struct {
 	Summary  string `json:"summary"`
 }
 
+type RegisterBatchRequest struct {
+	MaterialName string    `json:"material_name"`
+	LotNumber    string    `json:"lot_number"`
+	Steward      string    `json:"steward"`
+	CheckBasis   string    `json:"check_basis"`
+	MaxUsage     int       `json:"max_usage"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+type BatchTransitionRequest struct {
+	Actor  string `json:"actor"`
+	Reason string `json:"reason"`
+}
+
 type DeviceResponse struct {
 	Device domain.Device `json:"device"`
 }
@@ -40,6 +60,11 @@ type CaseResponse struct {
 	Measurements []domain.Measurement    `json:"measurements"`
 	Seal         *domain.EvidenceSeal    `json:"seal,omitempty"`
 	Events       []domain.AuditEvent     `json:"events"`
+}
+
+type BatchResponse struct {
+	Batch  domain.ReferenceBatch `json:"batch"`
+	Events []domain.AuditEvent   `json:"events"`
 }
 
 type EventsResponse struct {
